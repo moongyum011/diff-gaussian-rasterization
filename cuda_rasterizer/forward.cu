@@ -453,3 +453,53 @@ void FORWARD::preprocess(int P, int D, int M,
 		prefiltered
 		);
 }
+
+__global__ void calculateVisibilityInCameraCoords(
+    const uint2* __restrict__ ranges,
+    const uint32_t* __restrict__ point_list,
+    int num_points,
+    const float3* __restrict__ points_world, // Points in world coordinates
+    const float* __restrict__ features,
+    const float4* __restrict__ conic_opacity,
+    const float3* __restrict__ points_of_interest_world, // Points of interest in world coordinates
+    float* __restrict__ opacities,
+    const float4x4 camera_transform) // Camera transformation matrix
+{
+    int point_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (point_idx >= num_points) return;
+
+    float3 poi_world = points_of_interest_world[point_idx];
+    float3 poi_camera = transformPoint(camera_transform, poi_world);
+    float opacity = 1.0f;
+
+    uint2 range = ranges[point_idx];
+    for (int i = range.x; i < range.y; ++i) {
+        int splat_idx = point_list[i];
+        float3 splat_world = points_world[splat_idx];
+        float3 splat_camera = transformPoint(camera_transform, splat_world);
+
+        // Check if the splat is closer to the camera than the point of interest
+        if (splat_camera.z >= poi_camera.z)
+            continue;
+
+        float4 splat_properties = conic_opacity[splat_idx];
+        float3 d = { splat_camera.x - poi_camera.x, splat_camera.y - poi_camera.y, splat_camera.z - poi_camera.z };
+        float power = -0.5f * (splat_properties.x * d.x * d.x + splat_properties.z * d.y * d.y) - splat_properties.y * d.x * d.y;
+        if (power < 0.0f)
+            continue;
+
+        float alpha = min(0.99f, splat_properties.w * exp(power));
+        opacity *= (1.0f - alpha);
+    }
+
+    opacities[point_idx] = opacity;
+}
+
+// Helper function to apply transformation
+__device__ float3 transformPoint(const float4x4& mat, const float3& point) {
+    // Apply matrix transformation
+    return make_float3(
+        mat.m11 * point.x + mat.m12 * point.y + mat.m13 * point.z + mat.m14,
+        mat.m21 * point.x + mat.m22 * point.y + mat.m23 * point.z + mat.m24,
+        mat.m31 * point.x + mat.m32 * point.y + mat.m33 * point.z + mat.m34);
+}
